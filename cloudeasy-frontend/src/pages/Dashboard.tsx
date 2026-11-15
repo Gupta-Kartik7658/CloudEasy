@@ -15,7 +15,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [keysDialogOpen, setKeysDialogOpen] = useState(false);
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const navigate = useNavigate();
 
   const loadVMs = async () => {
@@ -75,6 +75,11 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {user?.email && (
+              <span className="hidden sm:inline-block text-xs text-muted-foreground px-2.5 py-1 rounded-md bg-muted/50 border border-border/50">
+                {user.email}
+              </span>
+            )}
             <Button onClick={() => setKeysDialogOpen(true)} variant="outline" size="sm">
               <Key className="w-4 h-4 mr-2" />
               SSH Keys

@@ -1,3 +1,4 @@
+import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select  # <-- IMPORT SELECT HERE TOO
 from models import VM, User, SSHKey
@@ -9,14 +10,14 @@ async def get_vm_by_name(db: AsyncSession, vm_name: str) -> VM | None:
 
 
 
-async def get_user_vm_by_name(db: AsyncSession, vm_name: str, user_id: str) -> VM | None:
+async def get_user_vm_by_name(db: AsyncSession, vm_name: str, user_id: uuid.UUID) -> VM | None:
     """Fetches a single VM by name, ONLY if it belongs to the specified user."""
     result = await db.execute(
         select(VM).where(VM.name == vm_name, VM.owner_id == user_id)
     )
     return result.scalars().first()
 
-async def get_vms_for_user(db: AsyncSession, user_id: str) -> list[VM]:
+async def get_vms_for_user(db: AsyncSession, user_id: uuid.UUID) -> list[VM]:
     """Fetches all VMs owned by a specific user."""
     result = await db.execute(select(VM).where(VM.owner_id == user_id))
     return result.scalars().all()
@@ -43,19 +44,19 @@ async def get_all_used_ports(db: AsyncSession) -> set[int]:
                 used_ports.add(rule["remotePort"])
     return used_ports
 
-async def get_user_key_by_name(db: AsyncSession, key_name: str, user_id: str) -> SSHKey | None:
+async def get_user_key_by_name(db: AsyncSession, key_name: str, user_id: uuid.UUID) -> SSHKey | None:
     """Fetches a single SSH key by name, only if it belongs to the user."""
     result = await db.execute(
         select(SSHKey).where(SSHKey.name == key_name, SSHKey.owner_id == user_id)
     )
     return result.scalars().first()
 
-async def get_keys_for_user(db: AsyncSession, user_id: str) -> list[SSHKey]:
+async def get_keys_for_user(db: AsyncSession, user_id: uuid.UUID) -> list[SSHKey]:
     """Fetches all SSH keys for a specific user."""
     result = await db.execute(select(SSHKey).where(SSHKey.owner_id == user_id))
     return result.scalars().all()
 
-async def create_ssh_key(db: AsyncSession, name: str, public_key: str, private_key: str, owner_id: str) -> SSHKey:
+async def create_ssh_key(db: AsyncSession, name: str, public_key: str, private_key: str, owner_id: uuid.UUID) -> SSHKey:
     """Creates a new SSH key record in the database."""
     new_key = SSHKey(
         name=name,
@@ -68,7 +69,7 @@ async def create_ssh_key(db: AsyncSession, name: str, public_key: str, private_k
     await db.refresh(new_key)
     return new_key
 
-async def is_key_in_use(db: AsyncSession, key_name: str, user_id: str) -> bool:
+async def is_key_in_use(db: AsyncSession, key_name: str, user_id: uuid.UUID) -> bool:
     """Checks if any VMs for the user are still using this key."""
     result = await db.execute(
         select(VM).where(

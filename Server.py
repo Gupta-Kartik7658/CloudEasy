@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # --- NEW IMPORTS ---
-from auth import UserRead, UserCreate  
+from auth import UserRead, UserCreate, UserUpdate
 from database import get_async_db, engine, async_session_factory
 from models import Base, User, VM
 from auth import auth_backend, fastapi_users, current_active_user
@@ -66,11 +66,13 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         
-    if not FRP_CONFIG_PATH.exists():
-        raise FileNotFoundError(f"CRITICAL: {FRP_CONFIG_PATH} not found.")
-    if not FRP_EXECUTABLE_PATH.exists():
-        raise FileNotFoundError(f"CRITICAL: frpc executable not found at {FRP_EXECUTABLE_PATH}")
-    start_frpc()
+    if FRP_CONFIG_PATH.exists() and FRP_EXECUTABLE_PATH.exists():
+        start_frpc()
+    else:
+        print(
+            f"[WARN] FRP files not found ({FRP_CONFIG_PATH} / {FRP_EXECUTABLE_PATH}). "
+            "Skipping frpc startup; API and authentication remain fully operational."
+        )
     
     yield
     
@@ -83,21 +85,13 @@ app = FastAPI(
     description="An API to manage local VMs and their frp tunnels.",
     lifespan=lifespan
 )
-# NEW: Add the CORS middleware configuration
-# This tells the backend to accept requests from your React app's origin
-origins = [
-    "http://localhost:5173",
-    "http://localhost:8080",
-    "https://CloudEasy.gupta-kartik.xyz",
-    "https://CloudEasy.vercel.app" # The address of your React frontend
-]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -107,12 +101,24 @@ app.include_router(
     tags=["auth"],
 )
 
-# This one line creates /auth/register
+# Open self-service account registration (/auth/register)
 app.include_router(
     fastapi_users.get_register_router(UserRead, UserCreate),
     prefix="/auth",
     tags=["auth"],
 )
+
+# Current user profile endpoint (/users/me)
+app.include_router(
+    fastapi_users.get_users_router(UserRead, UserUpdate),
+    prefix="/users",
+    tags=["users"],
+)
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 
 #endregion
@@ -632,8 +638,21 @@ def reload_frpc_background(background_tasks: BackgroundTasks):
 async def list_vms(current_user: User = Depends(current_active_user), db: AsyncSession = Depends(get_async_db)):
     """Returns the VMs for the CURRENT LOGGED-IN USER ONLY."""
     user_vms_data = await get_vms_for_user(db, current_user.id)
-    # Convert SQLAlchemy models to dicts for JSON response
-    return [vm.__dict__ for vm in user_vms_data]
+    return [
+        {
+            "id": vm.id,
+            "name": vm.name,
+            "key_name": vm.key_name,
+            "ram": vm.ram,
+            "cpu": vm.cpu,
+            "image": vm.image,
+            "private_ip": vm.private_ip,
+            "inbound_rules": vm.inbound_rules,
+            "status": vm.status.value if hasattr(vm.status, "value") else vm.status,
+            "owner_id": str(vm.owner_id),
+        }
+        for vm in user_vms_data
+    ]
 
 
 
