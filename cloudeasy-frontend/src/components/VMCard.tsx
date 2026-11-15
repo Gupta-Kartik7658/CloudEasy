@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { api, VM } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -91,6 +91,11 @@ const STATUS_LOOKUP: {
 export function VMCard({ vm, onDelete, onUpdate }: VMCardProps) {
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [displayedRules, setDisplayedRules] = useState(vm.inbound_rules || []);
+
+  useEffect(() => {
+    setDisplayedRules(vm.inbound_rules || []);
+  }, [vm.inbound_rules]);
 
   // 3. Get the correct display properties for the current status
   const statusDisplay = STATUS_LOOKUP[vm.status || "default"] || STATUS_LOOKUP.default;
@@ -216,12 +221,16 @@ const handleDelete = async () => {
 // You can also disable expanding while busy if you want
 //  disabled={isBusy} 
           >
-            <span>Network Rules ({vm.inbound_rules?.length || 0})</span>
+            <span>Network Rules ({displayedRules.length})</span>
             {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
           </Button>
 
           {expanded && (
-            <NetworkRulesSection vm={vm} onUpdate={onUpdate} />
+            <NetworkRulesSection
+              vm={{ ...vm, inbound_rules: displayedRules }}
+              onUpdate={onUpdate}
+              onRulesChanged={setDisplayedRules}
+            />
           )}
         </div>
 

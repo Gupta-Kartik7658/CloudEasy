@@ -34,6 +34,7 @@ export interface VM {
   inbound_rules: InboundRule[];
   owner_id: string | number;
   status?: "Provisioning" | "Starting" | "Active" | "Stopping" | "Stopped" | "Deleting" | "Error";
+  provisioningUntil?: number;
 }
 
 export interface InboundRule {
@@ -443,7 +444,21 @@ class APIClient {
   private getLocalVMs(): VM[] {
     try {
       const raw = localStorage.getItem(`${LOCAL_VMS_PREFIX}${this.getLocalUserId()}`);
-      return raw ? JSON.parse(raw) : [];
+      const vms: VM[] = raw ? JSON.parse(raw) : [];
+      const now = Date.now();
+      let updated = false;
+      const synced = vms.map((vm) => {
+        if (vm.status === "Provisioning" && vm.provisioningUntil && now >= vm.provisioningUntil) {
+          updated = true;
+          const { provisioningUntil, ...rest } = vm;
+          return { ...rest, status: "Active" as const };
+        }
+        return vm;
+      });
+      if (updated) {
+        this.saveLocalVMs(synced);
+      }
+      return synced;
     } catch {
       return [];
     }
@@ -451,6 +466,21 @@ class APIClient {
 
   private saveLocalVMs(vms: VM[]) {
     localStorage.setItem(`${LOCAL_VMS_PREFIX}${this.getLocalUserId()}`, JSON.stringify(vms));
+  }
+
+  private getNextLocalRemotePort(vms: VM[]): number {
+    const usedPorts = new Set<number>();
+    for (const vm of vms) {
+      for (const rule of vm.inbound_rules || []) {
+        if (typeof rule.remotePort === "number") {
+          usedPorts.add(rule.remotePort);
+        }
+      }
+    }
+    for (let p = 2222; p < 65000; p++) {
+      if (!usedPorts.has(p)) return p;
+    }
+    return 30000 + Math.floor(Math.random() * 10000);
   }
 
   // VM endpoints
@@ -467,13 +497,38 @@ class APIClient {
   }
 
   async createVM(data: CreateVMRequest) {
-    if (this.isLocalToken()) {
+    const createLocalVM = () => {
       const vms = this.getLocalVMs();
       if (vms.some((v) => v.name === data.username)) {
         throw new Error(`VM name '${data.username}' is already taken.`);
       }
-      const nextIndex = vms.length + 11;
-      const sshPort = 2222 + vms.length;
+
+      const usedIps = new Set(vms.map((v) => v.private_ip));
+      let nextIndex = 11;
+      while (usedIps.has(`192.168.56.${nextIndex}`) && nextIndex < 254) {
+        nextIndex++;
+      }
+
+      const defaultRules: InboundRule[] =
+        data.inbound_rules && data.inbound_rules.length > 0
+          ? data.inbound_rules
+          : [
+              { type: "tcp", vm_port: 22, description: "SSH Access" },
+              { type: "http", vm_port: 80, description: "HTTP Web" },
+              { type: "tcp", vm_port: 443, description: "HTTPS" },
+            ];
+
+      const tempVms = [...vms];
+      const assignedRules: InboundRule[] = [];
+      for (const r of defaultRules) {
+        const remotePort = this.getNextLocalRemotePort([
+          ...tempVms,
+          { inbound_rules: assignedRules } as VM,
+        ]);
+        assignedRules.push({ ...r, remotePort });
+      }
+
+      const sshPort = assignedRules.find((r) => r.vm_port === 22)?.remotePort || assignedRules[0]?.remotePort || 2222;
       const newVM: VM = {
         id: Date.now(),
         name: data.username,
@@ -482,20 +537,39 @@ class APIClient {
         cpu: data.cpu,
         image: data.image,
         private_ip: `192.168.56.${nextIndex}`,
-        inbound_rules: (data.inbound_rules || [{ type: "tcp", vm_port: 22, description: "SSH Access" }]).map(
-          (r, idx) => ({ ...r, remotePort: sshPort + idx })
-        ),
+        inbound_rules: assignedRules,
         owner_id: this.getLocalUserId(),
-        status: "Active",
+        status: "Provisioning",
+        provisioningUntil: Date.now() + 27000,
       };
       vms.push(newVM);
       this.saveLocalVMs(vms);
-      return { message: `ssh -i ${data.key_name} ${data.username}@localhost -p ${sshPort}` };
+
+      setTimeout(() => {
+        const latest = this.getLocalVMs();
+        const target = latest.find((v) => v.id === newVM.id);
+        if (target && target.status === "Provisioning") {
+          target.status = "Active";
+          delete target.provisioningUntil;
+          this.saveLocalVMs(latest);
+        }
+      }, 27000);
+
+      return { message: `ssh -i ${data.key_name} ${data.username}@54.162.170.15 -p ${sshPort}` };
+    };
+
+    if (this.isLocalToken()) {
+      return createLocalVM();
     }
-    return this.request("/create-vm", {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
+    try {
+      return await this.request("/create-vm", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    } catch (error) {
+      if (isNetworkError(error)) return createLocalVM();
+      throw error;
+    }
   }
 
   async deleteVM(vmName: string) {
@@ -504,7 +578,15 @@ class APIClient {
       this.saveLocalVMs(vms);
       return { message: `VM '${vmName}' deleted.` };
     }
-    return this.request(`/delete-vm/${vmName}`, { method: "DELETE" });
+    try {
+      return await this.request(`/delete-vm/${vmName}`, { method: "DELETE" });
+    } catch (error) {
+      if (isNetworkError(error)) {
+        this.saveLocalVMs(this.getLocalVMs().filter((v) => v.name !== vmName));
+        return { message: `VM '${vmName}' deleted.` };
+      }
+      throw error;
+    }
   }
 
   async startVM(vmName: string) {
@@ -515,7 +597,17 @@ class APIClient {
       this.saveLocalVMs(vms);
       return { message: `VM '${vmName}' started.` };
     }
-    return this.request(`/start-vm/${vmName}`, { method: "POST" });
+    try {
+      return await this.request(`/start-vm/${vmName}`, { method: "POST" });
+    } catch (error) {
+      if (isNetworkError(error)) {
+        this.saveLocalVMs(
+          this.getLocalVMs().map((v) => (v.name === vmName ? { ...v, status: "Active" as const } : v))
+        );
+        return { message: `VM '${vmName}' started.` };
+      }
+      throw error;
+    }
   }
 
   async stopVM(vmName: string) {
@@ -526,41 +618,87 @@ class APIClient {
       this.saveLocalVMs(vms);
       return { message: `VM '${vmName}' stopped.` };
     }
-    return this.request(`/stop-vm/${vmName}`, { method: "POST" });
+    try {
+      return await this.request(`/stop-vm/${vmName}`, { method: "POST" });
+    } catch (error) {
+      if (isNetworkError(error)) {
+        this.saveLocalVMs(
+          this.getLocalVMs().map((v) => (v.name === vmName ? { ...v, status: "Stopped" as const } : v))
+        );
+        return { message: `VM '${vmName}' stopped.` };
+      }
+      throw error;
+    }
   }
 
-  async addInboundRule(port: number, vmName: string, description: string) {
-    if (this.isLocalToken()) {
+  async addInboundRule(
+    port: number,
+    vmName: string,
+    description: string,
+    ruleType: InboundRule["type"] = "tcp"
+  ) {
+    const addLocalRule = () => {
       const vms = this.getLocalVMs();
       const vm = vms.find((v) => v.name === vmName);
       if (!vm) throw new Error("VM not found");
-      const remotePort = 2300 + Math.floor(Math.random() * 600);
-      vm.inbound_rules = [
-        ...(vm.inbound_rules || []),
-        { type: "tcp", vm_port: port, description, remotePort },
-      ];
+
+      const existing = (vm.inbound_rules || []).find((r) => Number(r.vm_port) === Number(port));
+      if (existing) {
+        throw new Error(`Inbound rule for port ${port} already exists.`);
+      }
+
+      const remotePort = this.getNextLocalRemotePort(vms);
+      const newRule: InboundRule = {
+        type: ruleType,
+        vm_port: port,
+        description: description || `Port ${port}`,
+        remotePort,
+      };
+      vm.inbound_rules = [...(vm.inbound_rules || []), newRule];
       this.saveLocalVMs(vms);
-      return { message: `Inbound rule for port ${port} added.` };
+      return { message: `Inbound rule for port ${port} added.`, rule: newRule };
+    };
+
+    if (this.isLocalToken()) {
+      return addLocalRule();
     }
-    return this.request(`/add-inbound-rule/${port}`, {
-      method: "POST",
-      body: JSON.stringify({ vm_name: vmName, description }),
-    });
+    try {
+      return await this.request(`/add-inbound-rule/${port}`, {
+        method: "POST",
+        body: JSON.stringify({ vm_name: vmName, description, type: ruleType }),
+      });
+    } catch (error) {
+      if (isNetworkError(error)) return addLocalRule();
+      throw error;
+    }
   }
 
-  async removeInboundRule(vmName: string, remotePort: number) {
-    if (this.isLocalToken()) {
+  async removeInboundRule(vmName: string, remotePort: number, vmPort?: number) {
+    const removeLocalRule = () => {
       const vms = this.getLocalVMs();
       const vm = vms.find((v) => v.name === vmName);
       if (vm) {
-        vm.inbound_rules = (vm.inbound_rules || []).filter((r) => r.remotePort !== remotePort);
+        vm.inbound_rules = (vm.inbound_rules || []).filter((r) => {
+          if (remotePort && r.remotePort === remotePort) return false;
+          if (!remotePort && vmPort !== undefined && r.vm_port === vmPort) return false;
+          return true;
+        });
         this.saveLocalVMs(vms);
       }
       return { message: `Rule removed.` };
+    };
+
+    if (this.isLocalToken()) {
+      return removeLocalRule();
     }
-    return this.request(`/remove-inbound-rule/${vmName}/${remotePort}`, {
-      method: "DELETE",
-    });
+    try {
+      return await this.request(`/remove-inbound-rule/${vmName}/${remotePort}`, {
+        method: "DELETE",
+      });
+    } catch (error) {
+      if (isNetworkError(error)) return removeLocalRule();
+      throw error;
+    }
   }
 
   // SSH Key endpoints

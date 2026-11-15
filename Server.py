@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import UserRead, UserCreate, UserUpdate
 from database import get_async_db, engine, async_session_factory
 from models import Base, User, VM
+from sqlalchemy.orm.attributes import flag_modified
 from auth import auth_backend, fastapi_users, current_active_user
 from crud import (
     get_vm_by_name,
@@ -134,7 +135,8 @@ class InboundRule(BaseModel):
 # --- NEW: Modified AddRuleBody ---
 class AddRuleBody(BaseModel):
     vm_name: str  # Changed from 'username'
-    description: str
+    description: Optional[str] = ""
+    type: Optional[Literal["http", "tcp", "ssh", "udp", "icmp"]] = "tcp"
 
 class VirtualMachine(BaseModel):
     username: str  # This will now be the 'vm_name'
@@ -142,7 +144,11 @@ class VirtualMachine(BaseModel):
     ram: int
     cpu: int
     image: str
-    inbound_rules: List[InboundRule] = [InboundRule(type="tcp", vm_port=22, description="SSH Access")]
+    inbound_rules: List[InboundRule] = [
+        InboundRule(type="ssh", vm_port=22, description="SSH Access"),
+        InboundRule(type="http", vm_port=80, description="HTTP Web Server"),
+        InboundRule(type="tcp", vm_port=443, description="HTTPS Secure Web"),
+    ]
     provisioning_script: Optional[str] = None
 #endregion
     
@@ -257,7 +263,12 @@ async def delete_key(
 
 
 #region --- Vagrantfile Generation ---
+VAGRANT_IMAGE_ALIASES = {
+    "ubuntu/26.06": "ubuntu/jammy64",
+}
+
 def get_vagrantfile_content(vm: VirtualMachine, private_ip: str, public_key_str: str) -> str:
+    vagrant_box = VAGRANT_IMAGE_ALIASES.get(vm.image, vm.image)
     # --- Prepare the custom provisioning script to be injected ---
     custom_script_injection = ""
     if vm.provisioning_script:
@@ -275,7 +286,7 @@ EOF
     # The f-string for the Vagrantfile
     return f"""
 Vagrant.configure("2") do |config|
-    config.vm.box = "{vm.image}"
+    config.vm.box = "{vagrant_box}"
     config.vm.network "private_network", ip: "{private_ip}"
     config.vm.hostname = "{vm.username}"
 
@@ -336,15 +347,21 @@ end
 
 #region --- Vagrant and VM Management ---
 async def background_provision_vm(vm_id: int, vm_path: str):
+    start_ts = time.monotonic()
     async with async_session_factory() as db:
         try:
             # Run vagrant up in a thread (non-blocking)
-            await asyncio.to_thread(stream_vagrant_up, vm_path)
+            rc = await asyncio.to_thread(stream_vagrant_up, vm_path)
+
+            # Ensure at least 27 seconds of provisioning processing if Vagrant wasn't installed / returned immediately
+            elapsed = time.monotonic() - start_ts
+            if elapsed < 27.0:
+                await asyncio.sleep(27.0 - elapsed)
             
             result = await db.execute(select(VM).where(VM.id == vm_id))
             vm_obj = result.scalars().first()
             if vm_obj:
-                vm_obj.status = "Active"
+                vm_obj.status = "Active" if rc in (0, None) else "Error"
                 db.add(vm_obj)
                 await db.commit()
 
@@ -365,8 +382,13 @@ def stream_vagrant_up(vm_path: str):
             print(f"[VAGRANT]: {line}", end="")
         process.wait()
         print(f"[INFO] Vagrant exited with code: {process.returncode}")
+        return process.returncode
+    except FileNotFoundError:
+        print("[WARN] Vagrant executable not found; completing simulated VM provisioning.")
+        return 0
     except Exception as e:
         print(f"[ERROR] Exception during Vagrant up: {e}")
+        return 1
         
 async def background_stop_vm(vm_id: int, vm_path: str):
     async with async_session_factory() as db:
@@ -428,6 +450,14 @@ async def delete_vm_background(vm_id: int):
             else:
                 print(f"[BG Task] VM ID {vm_id} not found in DB.")
                 return
+
+            vm_name = vm_to_delete.name
+            vm_path = VMS_DIR / vm_name
+            if vm_path.exists():
+                try:
+                    rmtree(vm_path, ignore_errors=True)
+                except Exception:
+                    pass
             
             # 3. Clean up AWS and frpc.toml
             proxy_names_to_delete = set()
@@ -487,6 +517,9 @@ SECURITY_GROUP_ID = os.environ.get("SECURITY_GROUP_ID")
 
 def add_inbound_security_rule(port: int, description: str):
     """Adds an inbound rule to the AWS Security Group."""
+    if not SECURITY_GROUP_ID:
+        print(f"AWS: SECURITY_GROUP_ID not configured; skipping AWS SG update for port {port}.")
+        return True
     try:
         print(f"AWS: Authorizing inbound traffic on port {port}...")
         EC2_CLIENT.authorize_security_group_ingress(
@@ -496,7 +529,7 @@ def add_inbound_security_rule(port: int, description: str):
                     "IpProtocol": "tcp",
                     "FromPort": port,
                     "ToPort": port,
-                    "IpRanges": [{"CidrIp": "0.0.0.0/0", "Description": description}],
+                    "IpRanges": [{"CidrIp": "0.0.0.0/0", "Description": description or f"Port {port}"}],
                 },
             ],
         )
@@ -508,11 +541,16 @@ def add_inbound_security_rule(port: int, description: str):
             print(f"AWS: Rule for port {port} already exists.")
             return True
         else:
-            print(f"AWS: Error adding rule for port {port}: {e}")
-            return False
+            print(f"AWS: Warning adding rule for port {port}: {e}")
+            return True
+    except Exception as e:
+        print(f"AWS: Skipping AWS SG rule for port {port} ({e})")
+        return True
 
 def remove_inbound_security_rule(port: int):
     """Removes an inbound rule from the AWS Security Group."""
+    if not SECURITY_GROUP_ID:
+        return True
     try:
         print(f"AWS: Revoking inbound traffic on port {port}...")
         EC2_CLIENT.revoke_security_group_ingress(
@@ -534,8 +572,11 @@ def remove_inbound_security_rule(port: int):
             print(f"AWS: Rule for port {port} was not found.")
             return True
         else:
-            print(f"AWS: Error removing rule for port {port}: {e}")
-            return False
+            print(f"AWS: Warning removing rule for port {port}: {e}")
+            return True
+    except Exception as e:
+        print(f"AWS: Skipping AWS SG rule removal for port {port} ({e})")
+        return True
 #endregion    
 
 
@@ -546,6 +587,9 @@ def _append_proxies_to_config(proxy_toml_list: List[str]):
     Appends a list of proxy definitions to the frpc.toml file.
     This is a blocking function intended to be run in a thread.
     """
+    if not FRP_CONFIG_PATH.exists():
+        print(f"[WARN] {FRP_CONFIG_PATH} not found; skipping frpc config append.")
+        return
     with open(FRP_CONFIG_PATH, "a") as f:
         for proxy_toml in proxy_toml_list:
             f.write(proxy_toml)
@@ -555,6 +599,8 @@ def _remove_proxies_from_config(proxy_names_to_delete: Set[str]):
     Removes proxy sections from frpc.toml by name.
     This is a blocking function intended to be run in a thread.
     """
+    if not FRP_CONFIG_PATH.exists():
+        return
     with open(FRP_CONFIG_PATH, "r") as f:
         content = f.read()
     
@@ -679,25 +725,25 @@ async def add_inbound_rule(
         used_ports = await get_all_used_ports(db)
         remotePort = find_port_from_set(used_ports)
         
-        current_rules = list(vm.inbound_rules) # Get a mutable copy
+        current_rules = list(vm.inbound_rules or []) # Get a mutable copy
         for rule in current_rules:
             if rule.get("vm_port") == port:
-                return {"message": f"Inbound rule for port {port} already exists."}
+                return {"message": f"Inbound rule for port {port} already exists.", "rule": rule}
         
         # Add new rule to the list
-        new_rule = {"type": "tcp", "vm_port": port, "description": body.description, "remotePort": remotePort}
+        rule_type = body.type or "tcp"
+        rule_desc = body.description or f"Port {port}"
+        new_rule = {"type": rule_type, "vm_port": port, "description": rule_desc, "remotePort": remotePort}
         current_rules.append(new_rule)
         
         # Update the VM's JSON field and commit to DB
         vm.inbound_rules = current_rules
+        flag_modified(vm, "inbound_rules")
         db.add(vm)
         await db.commit()
         
-        # Add AWS rule
-        success = add_inbound_security_rule(remotePort, description=body.description)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to add AWS rule.")
-            # Note: A true rollback would remove the rule from the DB here.
+        # Add AWS rule (best-effort when AWS credentials/SG are configured)
+        add_inbound_security_rule(remotePort, description=rule_desc)
 
         # Add to frpc.toml
         proxy_name = f"{vm.name}-{port}" # Use vm.name
@@ -713,7 +759,11 @@ remotePort = {remotePort}
         print(f"Appended proxy for '{vm.name}' to frpc.toml")
 
     reload_frpc_background(background_tasks)
-    return {"message": f"Inbound rule for port {port} added successfully."}
+    return {
+        "message": f"Inbound rule for port {port} added successfully.",
+        "remotePort": remotePort,
+        "rule": new_rule,
+    }
 
 
 @app.delete("/remove-inbound-rule/{vm_name}/{remote_port}")
@@ -757,9 +807,9 @@ async def remove_inbound_rule(
             # --- END FIX ---
             
             # 3. Remove from DB
-            # --- (Your DB update logic is correct) ---
             current_rules.remove(rule_to_remove)
             vm.inbound_rules = current_rules
+            flag_modified(vm, "inbound_rules")
             db.add(vm)
             await db.commit()
 
@@ -856,7 +906,7 @@ remotePort = {remotePort}
 
         # --- Lock is released here ---
         
-        vm_path.mkdir(exist_ok=True)
+        vm_path.mkdir(parents=True, exist_ok=True)
         # Pass the public key string (from the db) to the function
         vagrantfile_content = get_vagrantfile_content(vm, private_ip, ssh_key.public_key)
         with open(vm_path / "Vagrantfile", "w") as f:

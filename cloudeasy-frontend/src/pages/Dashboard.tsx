@@ -30,16 +30,16 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-  loadVMs(); // initial fetch
+    loadVMs(); // initial fetch
 
-  // 🔁 Poll every 5 seconds to refresh VM status
-  const interval = setInterval(() => {
-    loadVMs();
-  }, 40000);
+    // Poll every 5 seconds to refresh VM status
+    const interval = setInterval(() => {
+      loadVMs();
+    }, 5000);
 
-  // Cleanup when component unmounts
-  return () => clearInterval(interval);
-}, []);
+    // Cleanup when component unmounts
+    return () => clearInterval(interval);
+  }, []);
 
   const handleLogout = async () => {
     try {
