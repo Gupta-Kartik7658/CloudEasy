@@ -1,8 +1,10 @@
 from fastapi_users.db import SQLAlchemyBaseUserTableUUID
+from fastapi_users_db_sqlalchemy.generics import GUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Integer, JSON, ForeignKey, Text, UniqueConstraint
 from sqlalchemy import Enum
 import enum
+import uuid
 
 # This is the base class for all your database tables
 class Base(DeclarativeBase):
@@ -43,7 +45,7 @@ class VM(Base):
     )
     
     # This is the critical link back to the user who owns the VM
-    owner_id: Mapped[str] = mapped_column(ForeignKey("user.id"))
+    owner_id: Mapped[uuid.UUID] = mapped_column(GUID, ForeignKey("user.id"))
     
 class SSHKey(Base):
     __tablename__ = "ssh_keys"
@@ -56,7 +58,7 @@ class SSHKey(Base):
     private_key: Mapped[str] = mapped_column(Text)
     
     # Foreign key to the user table
-    owner_id: Mapped[str] = mapped_column(ForeignKey("user.id"))
+    owner_id: Mapped[uuid.UUID] = mapped_column(GUID, ForeignKey("user.id"))
     
     # Add a constraint to ensure a user cannot have two keys with the same name
     __table_args__ = (

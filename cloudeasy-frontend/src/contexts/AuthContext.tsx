@@ -1,8 +1,9 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from "react";
-import { api } from "@/lib/api";
+import { api, AuthUser } from "@/lib/api";
 
 interface AuthContextType {
   isAuthenticated: boolean;
+  user: AuthUser | null;
   login: (username: string, password: string) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -12,18 +13,49 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check if token exists in localStorage
-    const token = localStorage.getItem("auth_token");
-    setIsAuthenticated(!!token);
-    setLoading(false);
+    const unsubscribe = api.onUnauthorized(() => {
+      setUser(null);
+      setIsAuthenticated(false);
+    });
+
+    const initSession = async () => {
+      const token = api.getToken();
+      if (!token) {
+        setIsAuthenticated(false);
+        setUser(null);
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const currentUser = await api.getCurrentUser();
+        setUser(currentUser);
+        setIsAuthenticated(true);
+      } catch {
+        api.clearToken();
+        setUser(null);
+        setIsAuthenticated(false);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    initSession();
+    return unsubscribe;
   }, []);
 
   const login = async (username: string, password: string) => {
     await api.login({ username, password });
+    const currentUser = await api.getCurrentUser().catch(() => ({
+      id: "current",
+      email: username.trim().toLowerCase(),
+    }));
+    setUser(currentUser);
     setIsAuthenticated(true);
   };
 
@@ -34,17 +66,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     try {
       await api.logout();
-    } catch (error) {
-      // Ignore network or 401/204 issues — still log out locally
-      console.warn("Logout API failed, clearing local session anyway:", error);
     } finally {
-      localStorage.removeItem("auth_token");
+      setUser(null);
       setIsAuthenticated(false);
     }
   };
 
   return (
-    <AuthContext.Provider value={{ isAuthenticated, login, register, logout, loading }}>
+    <AuthContext.Provider value={{ isAuthenticated, user, login, register, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );
