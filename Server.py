@@ -856,7 +856,7 @@ remotePort = {remotePort}
         reload_frpc_background(background_tasks)
 
         ssh_port = vm_rules_list[0]['remotePort']
-        return {"message": f"ssh -i {vm.key_name} {vm.username}@13.233.204.203 -p {ssh_port}"}
+        return {"message": f"ssh -i {vm.key_name} {vm.username}@54.162.170.15 -p {ssh_port}"}
 
     except Exception as e:
         await db.rollback() # Rollback in case of error

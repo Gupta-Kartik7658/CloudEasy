@@ -192,7 +192,7 @@ const handleDelete = async () => {
   className="h-6 px-2 text-xs hover:bg-primary/10"
   onClick={() => {
     navigator.clipboard.writeText(
-      `ssh -i ${vm.key_name} ${vm.name}@13.233.204.203 -p ${sshPort}`
+      `ssh -i ${vm.key_name} ${vm.name}@54.162.170.15 -p ${sshPort}`
     );
     toast.success("SSH command copied!");
   }}
@@ -201,7 +201,7 @@ const handleDelete = async () => {
 </Button>
     </div>
     <code className="text-xs font-mono text-foreground break-all">
-      ssh -i {vm.key_name} {vm.name}@13.233.204.203 -p {sshPort}
+      ssh -i {vm.key_name} {vm.name}@54.162.170.15 -p {sshPort}
     </code>
   </div>
 )}
