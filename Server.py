@@ -400,6 +400,7 @@ def stream_vagrant_halt(vm_path: str):
         
         
 # --- NEW: delete_vm_background (MUST be async) ---
+# --- NEW: delete_vm_background (MUST be async) ---
 async def delete_vm_background(vm_id: int):
     """
     Fully self-contained background task to delete a VM and all its resources.
@@ -410,27 +411,17 @@ async def delete_vm_background(vm_id: int):
     async with async_session_factory() as db:
         try:     
             # 1. Fetch the VM from the DB
-            # --- (Your DB fetch logic is correct) ---
-            result = await db.execute(select(VM).where(VM.id == vm_id)) # You were missing 'select'
+            result = await db.execute(select(VM).where(VM.id == vm_id))
             vm_to_delete = result.scalars().first()
             
             if vm_to_delete:
                 vm_to_delete.status = "Deleting"
                 await db.commit()
+                # Refresh the instance so it stays attached to the session if needed for subsequent steps
+                await db.refresh(vm_to_delete)
             else:
                 print(f"[BG Task] VM ID {vm_id} not found in DB.")
                 return
-
-            vm_name = vm_to_delete.name
-            vm_path = VMS_DIR / vm_name
-            
-            # 2. Destroy Vagrant VM
-            # --- (Your vagrant/rmtree logic is correct) ---
-            if vm_path.exists():
-                destroy_proc = subprocess.run(["vagrant", "destroy", "-f"], cwd=vm_path, capture_output=True, text=True)
-                if destroy_proc.returncode != 0:
-                    print(f"Warning: Vagrant destroy failed for {vm_name}. Error: {destroy_proc.stderr.strip()}")
-                rmtree(vm_path)
             
             # 3. Clean up AWS and frpc.toml
             proxy_names_to_delete = set()
